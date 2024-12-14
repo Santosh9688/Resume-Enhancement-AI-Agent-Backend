@@ -1,0 +1,55 @@
+# Python bytecode files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python distribution/packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
+env/
+
+# IDE specific files
+.idea/           # PyCharm
+.vscode/         # Visual Studio Code
+*.swp           # Vim
+*.swo           # Vim
+.vs/            # Visual Studio
+
+# Local development configuration
+*.log
+.env
+.env.local
+.env.*.local
+
+# Database files
+*.db
+*.sqlite3
+
+# Operating System files
+.DS_Store       # macOS
+Thumbs.db       # Windows
+desktop.ini     # Windows
+
+# Project specific
+app.log         # Your application's log file
+database.log    # Your database log file
+api_routes.log  # Your API routes log file
+
+# Temporary files
+*.bak
+*.tmp
+*.temp
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
