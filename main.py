@@ -1,10 +1,20 @@
+# Core FastAPI imports
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# Database imports
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.database import get_db, verify_connection
-from app.routes import router as resume_router  # Import our routes
+
+# Import our route modules - each one handles a specific type of operation
+from app.routes.resume_enhancement import router as enhancement_router
+from app.routes.job_routes import router as job_router
+from app.routes.user_routes import router as user_router
+from app.routes.resume_routes import router as resume_router
+
+# Other utility imports
 import datetime
 import logging
 from typing import Dict, Any
@@ -12,11 +22,11 @@ from typing import Dict, Any
 # Configure comprehensive logging with both file and console handlers
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('app.log', encoding='utf-8')
-    ]
+        logging.FileHandler("app.log", encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -34,7 +44,7 @@ app = FastAPI(
     
     Use the interactive API documentation below to explore and test endpoints.
     """,
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Add CORS middleware to allow cross-origin requests
@@ -47,11 +57,47 @@ app.add_middleware(
 )
 
 # Include our router with API version prefix
+# Include each router with its specific configuration
+app.include_router(
+    user_router,
+    prefix="/api/v1/users",
+    tags=["User Operations"],
+    responses={
+        404: {"description": "User not found"},
+        500: {"description": "Internal server error"},
+    },
+)
+
 app.include_router(
     resume_router,
-    prefix="/api/v1",
-    tags=["Resume Operations"]
+    prefix="/api/v1/resumes",
+    tags=["Resume Operations"],
+    responses={
+        404: {"description": "Resume not found"},
+        500: {"description": "Internal server error"},
+    },
 )
+
+app.include_router(
+    job_router,
+    prefix="/api/v1/job-descriptions",
+    tags=["Job Operations"],
+    responses={
+        404: {"description": "Job description not found"},
+        500: {"description": "Internal server error"},
+    },
+)
+
+app.include_router(
+    enhancement_router,
+    prefix="/api/v1/enhancements",
+    tags=["Enhancement Operations"],
+    responses={
+        404: {"description": "Enhancement not found"},
+        500: {"description": "Internal server error"},
+    },
+)
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -70,7 +116,9 @@ async def startup_event():
         logger.error(f"Startup error: {str(e)}")
         raise
 
-@app.get("/",
+
+@app.get(
+    "/",
     tags=["Health Check"],
     summary="API Health Check",
     response_description="Basic API status information",
@@ -83,17 +131,17 @@ async def startup_event():
                         "status": "active",
                         "message": "Resume AI Backend is running!",
                         "version": "1.0.0",
-                        "timestamp": "2024-12-13T00:00:00Z"
+                        "timestamp": "2024-12-13T00:00:00Z",
                     }
                 }
-            }
+            },
         }
-    }
+    },
 )
 def read_root() -> Dict[str, Any]:
     """
     Root endpoint providing basic API health check.
-    
+
     Returns:
         Dict containing API status, version, and timestamp
     """
@@ -101,10 +149,12 @@ def read_root() -> Dict[str, Any]:
         "status": "active",
         "message": "Resume AI Backend is running!",
         "version": "1.0.0",
-        "timestamp": datetime.datetime.utcnow().isoformat()
+        "timestamp": datetime.datetime.utcnow().isoformat(),
     }
 
-@app.get("/db-test",
+
+@app.get(
+    "/db-test",
     tags=["Health Check"],
     summary="Database Connection Test",
     response_description="Detailed database connection information",
@@ -121,11 +171,11 @@ def read_root() -> Dict[str, Any]:
                             "username": "dbo",
                             "server_name": "LAPTOP-6ST82K8K",
                             "edition": "Developer Edition",
-                            "product_version": "16.0.1135.2"
-                        }
+                            "product_version": "16.0.1135.2",
+                        },
                     }
                 }
-            }
+            },
         },
         500: {
             "description": "Database connection failed",
@@ -133,23 +183,23 @@ def read_root() -> Dict[str, Any]:
                 "application/json": {
                     "example": {
                         "status": "error",
-                        "detail": "Database connection error"
+                        "detail": "Database connection error",
                     }
                 }
-            }
-        }
-    }
+            },
+        },
+    },
 )
 def test_db(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """
     Test endpoint verifying database connectivity and configuration.
-    
+
     Args:
         db: Database session injected by FastAPI
-        
+
     Returns:
         Dict containing database connection details and status
-        
+
     Raises:
         HTTPException: If database connection fails
     """
@@ -177,28 +227,29 @@ def test_db(db: Session = Depends(get_db)) -> Dict[str, Any]:
                 "username": db_info.username,
                 "server_name": db_info.server_name,
                 "edition": db_info.edition,
-                "product_version": db_info.version
+                "product_version": db_info.version,
             },
             "sql_server_version": version,
-            "timestamp": datetime.datetime.utcnow().isoformat()
+            "timestamp": datetime.datetime.utcnow().isoformat(),
         }
     except Exception as e:
         logger.error(f"Database test failed: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database connection error: {str(e)}"
+            detail=f"Database connection error: {str(e)}",
         )
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc) -> JSONResponse:
     """
     Global exception handler providing consistent error responses.
     Logs all unhandled exceptions for monitoring and debugging.
-    
+
     Args:
         request: The request that caused the exception
         exc: The unhandled exception
-        
+
     Returns:
         JSONResponse with error details and timestamp
     """
@@ -209,6 +260,6 @@ async def global_exception_handler(request, exc) -> JSONResponse:
             "status": "error",
             "message": "An unexpected error occurred",
             "detail": str(exc),
-            "timestamp": datetime.datetime.utcnow().isoformat()
-        }
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+        },
     )

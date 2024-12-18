@@ -1,0 +1,10 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\app",
+    "\\app\\llm",
+    "\\app\\routes"
+  ],
+  "SelectedNode": "\\app\\routes\\resume_routes.py",
+  "PreviewInSolutionExplorer": false
+}
