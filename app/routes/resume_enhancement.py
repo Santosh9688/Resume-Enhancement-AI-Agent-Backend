@@ -6,34 +6,57 @@ from fastapi import (
     HTTPException,
     Query,
     status,
+    BackgroundTasks,
     File,
     UploadFile,
     Form,
     Path,
 )
-from fastapi.responses import JSONResponse
+from fastapi import Path as FastAPIPath
+import zipfile
+from fastapi.responses import JSONResponse, FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
 from app.validators.input_validator import EnhancementRequest
 from app.validators.file_validator import FileValidator
 from app.validators.resume_validator import ResumeValidator
 from app.core.exceptions import ValidationError, FileProcessingError
+from app.utils.resume_generator import resume_generator
 import json
 import logging
 from app.database import get_db
 from app.models.models import ResumeEnhancement, JobDescription, Resume, User
 from app.llm.anthropic_client import ResumeEnhancer  # We'll create this next
+from app.llm.openai_client import OpenAIResumeEnhancer, OpenAIError
+from app.handlers.template_handler import DocxTemplateHandler
+from app.llm.docxtemplate_resume_enhancer import DocxTemplateEnhancer
 import pypdf
 import docx
+import tempfile
 import io
+from docxtpl import DocxTemplate
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 import os
 import magic
+import shutil
 
 resume_enhancer = ResumeEnhancer()
+openai_enhancer = OpenAIResumeEnhancer()
+template_handler = DocxTemplateHandler(
+    template_path=r"C:\Users\15613\Desktop\12-12@Resume AI Agent\resume-ai-backend\app\templates\ATS_Resume_Template.docx"
+)
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    filename="resume_generation.log",  # This creates a log file
+    filemode="a",  # Append mode, so we don't overwrite previous logs
+)
+logger = logging.getLogger("resume_enhancement")
 # Configure enhanced logging
 logger = logging.getLogger("file_processing")
 # Add this at the start of your file for more detailed logging
@@ -239,6 +262,114 @@ class CustomQueryResponse(BaseModel):
     )
 
 
+class ResumeDocxRequest(BaseModel):
+    """
+    Request model for DOCX resume generation that exactly matches the template structure.
+    Each field corresponds to a placeholder in the DOCX template.
+    """
+
+    # Personal Information
+    candidate_name: str = Field(..., description="Full name of the candidate")
+    linkedin_username: str = Field(..., description="LinkedIn profile username")
+    candidate_email: str = Field(..., description="Professional email address")
+    candidate_phone: str = Field(..., description="Contact phone number")
+
+    # Professional Summary
+    job_title: str = Field(..., description="Current or desired job title")
+    summary_text: str = Field(
+        ..., description="Professional summary or objective statement"
+    )
+
+    # Section Headers (for customization)
+    key_skills: str = Field(
+        default="KEY SKILLS", description="Header for skills section"
+    )
+    career_highlights: str = Field(
+        default="CAREER HIGHLIGHTS", description="Header for career highlights section"
+    )
+    professional_experience: str = Field(
+        default="PROFESSIONAL EXPERIENCE", description="Header for experience section"
+    )
+    education_heading: str = Field(
+        default="EDUCATION", description="Header for education section"
+    )
+    key_responsibilities: str = Field(
+        default="Key Responsibilities",
+        description="Header for responsibilities subsection",
+    )
+
+    # Skills Section
+    backend_skills: Optional[str] = Field(
+        None, description="Backend development skills"
+    )
+    frontend_skills: Optional[str] = Field(
+        None, description="Frontend development skills"
+    )
+    database_skills: Optional[str] = Field(
+        None, description="Database management skills"
+    )
+    cloud_technologies: Optional[str] = Field(
+        None, description="Cloud technology skills"
+    )
+    devops_skills: Optional[str] = Field(None, description="DevOps and CI/CD skills")
+    methodologies: Optional[str] = Field(None, description="Development methodologies")
+    soft_skills: Optional[str] = Field(None, description="Soft skills and competencies")
+
+    # Career Highlights
+    career_highlight_1: Optional[str] = Field(
+        None, description="First career highlight"
+    )
+    career_highlight_2: Optional[str] = Field(
+        None, description="Second career highlight"
+    )
+    career_highlight_3: Optional[str] = Field(
+        None, description="Third career highlight"
+    )
+    career_highlight_4: Optional[str] = Field(
+        None, description="Fourth career highlight"
+    )
+
+    # Professional Experience - Job 1
+    job1_company: Optional[str] = Field(None, description="First company name")
+    job1_location: Optional[str] = Field(None, description="First job location")
+    job1_title: Optional[str] = Field(None, description="First job title")
+    job1_dates: Optional[str] = Field(None, description="First job duration")
+    job1_description: Optional[str] = Field(None, description="First job description")
+    job1_responsibilities: Optional[List[str]] = Field(
+        None, description="First job responsibilities"
+    )
+
+    # Professional Experience - Job 2
+    job2_company: Optional[str] = Field(None, description="Second company name")
+    job2_location: Optional[str] = Field(None, description="Second job location")
+    job2_title: Optional[str] = Field(None, description="Second job title")
+    job2_dates: Optional[str] = Field(None, description="Second job duration")
+    job2_description: Optional[str] = Field(None, description="Second job description")
+    job2_responsibilities: Optional[List[str]] = Field(
+        None, description="Second job responsibilities"
+    )
+
+    # Professional Experience - Job 3
+    job3_company: Optional[str] = Field(None, description="Third company name")
+    job3_location: Optional[str] = Field(None, description="Third job location")
+    job3_title: Optional[str] = Field(None, description="Third job title")
+    job3_dates: Optional[str] = Field(None, description="Third job duration")
+    job3_description: Optional[str] = Field(None, description="Third job description")
+    job3_responsibilities: Optional[List[str]] = Field(
+        None, description="Third job responsibilities"
+    )
+
+    # Education Section
+    masters_title: Optional[str] = Field(None, description="Master's degree title")
+    masters_institution: Optional[str] = Field(None, description="Master's institution")
+    masters_year: Optional[str] = Field(None, description="Master's completion year")
+    bachelor_title: Optional[str] = Field(None, description="Bachelor's degree title")
+    bachelor_institution: Optional[str] = Field(
+        None, description="Bachelor's institution"
+    )
+    bachelor_year: Optional[str] = Field(None, description="Bachelor's completion year")
+
+
 async def validate_user(user_id: int, db: Session) -> User:
     """Validate user exists and return user object."""
     user = db.query(User).filter(User.UserID == user_id).first()
@@ -350,7 +481,9 @@ async def process_pdf_file(file_path: str) -> str:
             for page_num, page in enumerate(pdf_reader.pages, 1):
                 page_text = page.extract_text()
                 if not page_text.strip():
-                    logger.warning(f"Empty text on page {page_num}")
+                    # Add a statement to avoid a syntax error
+                    # for example, skip empty pages
+                    continue
                 text_content.append(page_text)
 
             final_text = "\n".join(text_content)
@@ -397,7 +530,7 @@ async def create_database_records(
         # Create Resume record
         resume = Resume(UserID=user_id, ResumeContent=resume_text, Version=1)
         db.add(resume)
-        await db.flush()
+        db.flush()
 
         # Create JobDescription record
         job_desc = JobDescription(
@@ -425,27 +558,56 @@ async def create_database_records(
 
 # Database operations
 async def handle_database_transaction(db: Session, transaction_func, *args, **kwargs):
-    """Handle database transactions with retry logic"""
-    max_retries = 3
-    retry_count = 0
-
-    while retry_count < max_retries:
+    async with db.begin() as transaction:
         try:
-            async with db.begin() as transaction:
-                result = await transaction_func(*args, **kwargs)
-                await transaction.commit()
-                return result
-
+            result = await transaction_func(*args, **kwargs)
+            return result
         except SQLAlchemyError as e:
-            retry_count += 1
-            if retry_count >= max_retries:
-                logger.error(
-                    f"Database transaction failed after {max_retries} attempts: {str(e)}"
-                )
-                raise DatabaseError(f"Database operation failed: {str(e)}")
-
-            logger.warning(f"Transaction attempt {retry_count} failed, retrying...")
             await transaction.rollback()
+            logger.error(f"Database error: {str(e)}")
+            raise DatabaseError(f"Database operation failed: {str(e)}")
+
+
+# Open AI Models
+class OpenAITestResponse(BaseModel):
+    """Response model for OpenAI test endpoint"""
+
+    status: str = Field(..., description="Status of the test", example="success")
+    message: str = Field(
+        ..., description="Status message", example="OpenAI connection successful"
+    )
+    test_response: str = Field(
+        ...,
+        description="Response from OpenAI",
+        example="This is a test response from GPT-4",
+    )
+    model: str = Field(
+        ..., description="Model used for the test", example="gpt-4-turbo-preview"
+    )
+
+
+class OpenAICustomQueryRequest(BaseModel):
+    """Request model for OpenAI custom queries"""
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="The question or prompt to send to OpenAI",
+        example="What are the key elements of a strong resume?",
+    )
+    max_tokens: Optional[int] = Field(
+        1000, ge=1, le=4096, description="Maximum length of the response", example=1000
+    )
+
+
+class OpenAICustomQueryResponse(BaseModel):
+    """Response model for OpenAI custom queries"""
+
+    status: str = Field(..., description="Status of the query", example="success")
+    query: str = Field(..., description="Original query that was sent")
+    response: str = Field(..., description="Response from OpenAI")
+    model: str = Field(..., description="Model used for the response")
 
 
 # Router instance
@@ -544,15 +706,12 @@ async def enhance_resume(
         try:
             # Create the transaction manager instance
             transaction_manager = TransactionManager(db)
-            # Debugging point 5: Database operation start
             logger.debug(
                 f"Created TransactionManager with session id: {id(transaction_manager.db)}"
             )
-            # Ensure no transaction is in progress
-            if db.in_transaction():
-                logger.warning("Existing transaction found, rolling back")
-                await db.rollback()
-            resume, job_desc = await transaction_manager.execute_operation(
+
+            # Execute the database operation and await the result
+            resume, job_desc = transaction_manager.execute_operation(
                 create_database_records,
                 "Failed to create database records",
                 db=db,
@@ -562,17 +721,16 @@ async def enhance_resume(
                 preferred_job_titles=preferred_job_titles,
                 keywords=keywords,
             )
+
             logger.debug(
                 f"Database operation completed - Resume ID: {resume.ResumeID if resume else 'None'}"
             )
-            return EnhancementResponse(
-                status="success",
-                enhancement_id=resume.ResumeID,
-                enhanced_resume="Sample enhanced resume",  # Replace with actual enhancement
-                changes_summary={"sample": "changes"},  # Replace with actual changes
-            )
+
         except DatabaseError as e:
             logger.error(f"Database operation failed: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+            )
 
         # Stage 4: AI Enhancement
         logger.debug("Starting AI enhancement")
@@ -597,29 +755,26 @@ async def enhance_resume(
                 f"AI enhancement completed, result length: {len(enhancement_result.get('enhanced_resume', ''))}"
             )
 
-        except Exception as e:
-            logger.error(f"AI enhancement failed: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content=ErrorResponse(
-                    message="AI enhancement failed",
-                    error_type="ai_error",
-                    details={"error": str(e)},
-                ).model_dump(),
+            # Stage 5: Final Response
+            logger.debug("Preparing successful response")
+            return EnhancementResponse(
+                status="success",
+                enhancement_id=resume.ResumeID,
+                enhanced_resume=enhancement_result["enhanced_resume"],
+                changes_summary=enhancement_result["changes_summary"],
             )
 
-        # Stage 5: Final Response
-        # Debugging point 8: Prepare successful response
-        logger.debug("Preparing successful response")
-        return EnhancementResponse(
-            status="success",
-            enhancement_id=resume.ResumeID,  # Use the actual ID
-            enhanced_resume=enhancement_result["enhanced_resume"],
-            changes_summary=enhancement_result["changes_summary"],
-        )
+        except Exception as e:
+            logger.error(f"AI enhancement failed: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"AI enhancement failed: {str(e)}",
+            )
 
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        # Debugging point 9: Catch unexpected errors
         logger.error(f"Unexpected error: {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -638,7 +793,7 @@ async def enhance_resume(
     description="Retrieves the complete details of a specific resume enhancement",
 )
 async def get_enhancement(
-    enhancement_id: int = Path(
+    enhancement_id: int = FastAPIPath(
         ..., description="The ID of the enhancement to retrieve", example=1, gt=0
     ),
     db: Session = Depends(get_db),
@@ -759,4 +914,680 @@ async def custom_llm_query(request: CustomQueryRequest):
                 error_type="llm_error",
                 details={"error": str(e)},
             ).model_dump(),
+        )
+
+
+@router.post(
+    "/test-openai",
+    response_model=OpenAITestResponse,
+    summary="Test OpenAI Connection",
+    description="Test endpoint to verify if the OpenAI integration is working properly",
+)
+async def test_openai_connection():
+    """
+    Tests the OpenAI connection and verifies that the integration is working.
+    This endpoint serves as a health check for the OpenAI integration by:
+    1. Verifying the API key is valid
+    2. Testing the connection to OpenAI's servers
+    3. Ensuring the model responds appropriately
+    4. Validating response formatting
+    """
+    try:
+        logger.info("Starting OpenAI connection test")
+
+        # Attempt to make a test connection
+        response = await openai_enhancer.test_connection()
+
+        # Format the response according to our model
+        formatted_response = OpenAITestResponse(
+            status=response["status"],
+            message=response["message"],
+            test_response=response["test_response"],
+            model=response["model"],
+        )
+
+        logger.info("OpenAI connection test completed successfully")
+        return formatted_response
+
+    except OpenAIError as e:
+        # Handle OpenAI-specific errors
+        logger.error(
+            f"OpenAI test failed: {str(e)}",
+            extra={"error_type": e.error_type, "details": e.details},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "message": str(e),
+                "error_type": e.error_type,
+                "details": e.details,
+            },
+        )
+
+    except Exception as e:
+        # Handle unexpected errors
+        logger.error(f"Unexpected error during OpenAI test: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during the OpenAI connection test",
+        )
+
+
+@router.post(
+    "/openai-query",
+    response_model=OpenAICustomQueryResponse,
+    summary="Send a custom query to OpenAI",
+    description="Send any question or prompt to OpenAI and get a detailed response",
+)
+async def openai_custom_query(request: OpenAICustomQueryRequest):
+    """
+    Processes a custom query using OpenAI's API.
+    This endpoint allows testing different prompts and receiving detailed responses.
+
+    The endpoint performs several steps:
+    1. Validates the input query and parameters
+    2. Sends the request to OpenAI
+    3. Processes and formats the response
+    4. Handles any errors that occur
+    """
+    try:
+        logger.info(
+            "Processing custom OpenAI query",
+            extra={
+                "query_preview": request.query[:100],
+                "max_tokens": request.max_tokens,
+            },
+        )
+
+        # Send the query to OpenAI
+        response = await openai_enhancer.custom_query(
+            user_query=request.query, max_tokens=request.max_tokens
+        )
+
+        # Format the response according to our model
+        formatted_response = OpenAICustomQueryResponse(
+            status=response["status"],
+            query=response["query"],
+            response=response["response"],
+            model=response["model"],
+        )
+
+        logger.info("Custom query processed successfully")
+        return formatted_response
+
+    except OpenAIError as e:
+        # Handle OpenAI-specific errors with detailed logging
+        logger.error(
+            f"OpenAI query failed: {str(e)}",
+            extra={
+                "error_type": e.error_type,
+                "details": e.details,
+                "query_preview": request.query[:100],
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "message": str(e),
+                "error_type": e.error_type,
+                "details": e.details,
+            },
+        )
+
+    except Exception as e:
+        # Handle unexpected errors
+        logger.error(f"Unexpected error in custom query: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while processing your query",
+        )
+
+
+@router.post(
+    "/test-openai-enhancement",
+    response_model=EnhancementResponse,
+    summary="Test OpenAI Resume Enhancement",
+    description="Test the resume enhancement functionality using OpenAI",
+)
+async def test_openai_enhancement(
+    resume_text: str = Form(...),
+    job_description: str = Form(...),
+    preferred_titles: Optional[str] = Form(None),
+    target_industries: Optional[str] = Form(None),
+    keywords: Optional[str] = Form(None),
+):
+    """
+    Tests the resume enhancement functionality with OpenAI.
+    This endpoint allows testing the enhancement process without requiring
+    file uploads or database operations.
+
+    The process includes:
+    1. Input validation and preprocessing
+    2. Formatting preferences and requirements
+    3. Sending the enhancement request to OpenAI
+    4. Processing and returning the enhanced resume
+    """
+    try:
+        logger.info(
+            "Starting resume enhancement test",
+            extra={
+                "resume_length": len(resume_text),
+                "job_desc_length": len(job_description),
+                "has_preferences": bool(
+                    preferred_titles or target_industries or keywords
+                ),
+            },
+        )
+
+        # Validate input lengths
+        if len(resume_text.strip()) < 50:
+            raise ValueError(
+                "Resume text is too short - please provide at least 50 characters"
+            )
+        if len(job_description.strip()) < 50:
+            raise ValueError(
+                "Job description is too short - please provide at least 50 characters"
+            )
+
+        # Prepare preferences dictionary
+        preferences = {
+            "preferred_job_titles": preferred_titles.split(",")
+            if preferred_titles
+            else [],
+            "target_industries": target_industries.split(",")
+            if target_industries
+            else [],
+            "keywords": keywords.split(",") if keywords else [],
+        }
+
+        # Process enhancement request
+        enhancement_result = await openai_enhancer.enhance_resume(
+            resume_content=resume_text,
+            job_description=job_description,
+            preferences=preferences,
+        )
+
+        # Format the response using our response model
+        formatted_response = EnhancementResponse(
+            status="success",
+            enhancement_id=0,  # Test endpoint doesn't create database records
+            enhanced_resume=enhancement_result["enhanced_resume"],
+            changes_summary=enhancement_result["changes_summary"],
+        )
+
+        logger.info("Resume enhancement test completed successfully")
+        return formatted_response
+
+    except OpenAIError as e:
+        # Handle OpenAI-specific errors
+        logger.error(
+            f"OpenAI enhancement failed: {str(e)}",
+            extra={"error_type": e.error_type, "details": e.details},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "message": str(e),
+                "error_type": e.error_type,
+                "details": e.details,
+            },
+        )
+
+    except ValueError as ve:
+        # Handle validation errors
+        logger.warning(f"Validation error: {str(ve)}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+
+    except Exception as e:
+        # Handle unexpected errors
+        logger.error(f"Unexpected error in enhancement test: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during the enhancement process",
+        )
+
+
+def create_temp_directory() -> str:
+    """Create a temporary directory with proper permissions and cleanup handling."""
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="resume_gen_")
+        os.chmod(temp_dir, 0o755)  # Read/write for owner, read/execute for others
+        if not os.path.exists(temp_dir) or not os.access(temp_dir, os.W_OK):
+            raise FileProcessingError("Failed to create writable temporary directory")
+        return temp_dir
+    except Exception as e:
+        logger.error(f"Failed to create temporary directory: {str(e)}")
+        raise FileProcessingError(f"Failed to create temporary directory: {str(e)}")
+
+
+class CleanupTask:
+    """Helper class for cleaning up temporary files."""
+
+    def __init__(self, temp_dir: str):
+        self.temp_dir = temp_dir
+
+    async def cleanup(self):
+        """Cleanup temporary directory with proper error handling."""
+        try:
+            if self.temp_dir and os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+                logger.info(
+                    f"Successfully cleaned up temporary directory: {self.temp_dir}"
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to cleanup temporary directory {self.temp_dir}: {str(e)}"
+            )
+
+
+def validate_enhancement_result(result: Dict[str, Any]) -> None:
+    """Validate the enhancement result structure."""
+    required_fields = ["enhanced_resume", "changes_summary"]
+    if not isinstance(result, dict):
+        raise ValueError("Enhancement result must be a dictionary")
+    for field in required_fields:
+        if field not in result:
+            raise ValueError(f"Missing required field in enhancement result: {field}")
+    if (
+        not isinstance(result["enhanced_resume"], str)
+        or not result["enhanced_resume"].strip()
+    ):
+        raise ValueError("Enhanced resume must be a non-empty string")
+    if not isinstance(result["changes_summary"], dict):
+        raise ValueError("Changes summary must be a dictionary")
+
+
+# Add this to your resume_enhancement.py file, inside the generate_standard_resume function
+@router.post(
+    "/generate-resume-docx",
+    response_class=FileResponse,
+    summary="Generate a formatted resume DOCX",
+    description="Generate a professionally formatted resume in DOCX format using provided data",
+)
+async def generate_resume_docx(
+    request: ResumeDocxRequest, background_tasks: BackgroundTasks
+):
+    """
+    Generate a formatted resume in DOCX format using the provided data.
+
+    This endpoint:
+    1. Validates the input data
+    2. Generates a document using the template
+    3. Returns the document as a downloadable file
+    """
+    try:
+        logger.info(f"Starting resume generation for {request.candidate_name}")
+
+        # Convert Pydantic model to dict
+        resume_data = request.model_dump()
+
+        # Generate and return the document
+        return await resume_generator.generate_resume_docx(
+            resume_data=resume_data, background_tasks=background_tasks
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to generate resume: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate resume: {str(e)}",
+        )
+
+
+@router.post(
+    "/auto-generate-resume",
+    response_class=FileResponse,
+    summary="Automatically generate an enhanced resume DOCX",
+    description="Process a resume with OpenAI and generate a formatted DOCX file",
+)
+async def auto_generate_resume(
+    resume_file: UploadFile = File(...),
+    job_description: str = Form(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    preferred_titles: Optional[str] = Form(None),
+    target_industries: Optional[str] = Form(None),
+    keywords: Optional[str] = Form(None),
+):
+    """
+    This endpoint combines LLM enhancement with DOCX generation:
+    1. Extracts text from the uploaded resume
+    2. Processes it through OpenAI to enhance and structure it
+    3. Generates a formatted DOCX using our template
+    """
+    try:
+        # Extract resume text
+        resume_text = await process_file_with_cleanup(resume_file)
+
+        # Process through OpenAI
+        enhancement_result = await openai_enhancer.enhance_resume(
+            resume_content=resume_text,
+            job_description=job_description,
+            preferences={
+                "preferred_job_titles": preferred_titles.split(",")
+                if preferred_titles
+                else [],
+                "target_industries": target_industries.split(",")
+                if target_industries
+                else [],
+                "keywords": keywords.split(",") if keywords else [],
+            },
+        )
+
+        # Format the enhanced content into template structure
+        template_data = format_enhanced_content_for_template(enhancement_result)
+
+        # Generate DOCX
+        return await resume_generator.generate_resume_docx(
+            resume_data=template_data, background_tasks=background_tasks
+        )
+
+    except Exception as e:
+        logger.error(f"Auto-generation failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate enhanced resume: {str(e)}",
+        )
+
+
+def format_enhanced_content_for_template(enhancement_result: dict) -> dict:
+    """
+    Converts the LLM enhancement result into our template format.
+    """
+    # Parse the enhanced resume content
+    enhanced_content = enhancement_result["enhanced_resume"]
+
+    try:
+        # Try to parse as JSON first (in case LLM returned structured data)
+        structured_data = json.loads(enhanced_content)
+    except json.JSONDecodeError:
+        # If not JSON, parse the text content
+        structured_data = parse_resume_text(enhanced_content)
+
+    return structured_data
+
+
+def parse_resume_text(text: str) -> dict:
+    """
+    Parses plain text resume into structured format matching our template.
+    Uses basic text analysis to identify sections and content.
+    """
+    # Initialize template structure
+    template_data = {
+        "candidate_name": "",
+        "linkedin_username": "",
+        "candidate_email": "",
+        "candidate_phone": "",
+        "job_title": "",
+        "summary_text": "",
+        "backend_skills": "",
+        "frontend_skills": "",
+        "database_skills": "",
+        "cloud_technologies": "",
+        "devops_skills": "",
+        "methodologies": "",
+        "soft_skills": "",
+        "career_highlights": [],
+        "job1_responsibilities": [],
+        "job2_responsibilities": [],
+        "job3_responsibilities": [],
+        "education_heading": "EDUCATION",
+        "masters_title": "",
+        "masters_institution": "",
+        "masters_year": "",
+        "bachelor_title": "",
+        "bachelor_institution": "",
+        "bachelor_year": "",
+    }
+
+    # Split into sections
+    sections = text.split("\n\n")
+
+    for section in sections:
+        section = section.strip()
+
+        # Basic section identification logic
+        if section.lower().startswith("summary"):
+            template_data["summary_text"] = section.split(":", 1)[1].strip()
+
+        elif "experience" in section.lower():
+            # Parse job details
+            jobs = parse_job_experience(section)
+            for idx, job in enumerate(jobs, 1):
+                if idx <= 3:  # We support up to 3 jobs
+                    prefix = f"job{idx}_"
+                    template_data[f"{prefix}company"] = job.get("company", "")
+                    template_data[f"{prefix}title"] = job.get("title", "")
+                    template_data[f"{prefix}dates"] = job.get("dates", "")
+                    template_data[f"{prefix}description"] = job.get("description", "")
+                    template_data[f"{prefix}responsibilities"] = job.get(
+                        "responsibilities", []
+                    )
+
+        elif "skills" in section.lower():
+            skills = parse_skills_section(section)
+            template_data.update(skills)
+
+        elif "education" in section.lower():
+            education = parse_education_section(section)
+            template_data.update(education)
+
+    return template_data
+
+
+def parse_job_experience(text: str) -> list:
+    """Parse job experience section into structured format."""
+    jobs = []
+    current_job = {}
+    for line in text.split("\n"):
+        line = line.strip()
+        if line:
+            # Basic job parsing logic
+            if ":" in line and not line.startswith("-"):
+                current_job = {"responsibilities": []}
+                company_title = line.split(":")
+                current_job["company"] = company_title[0].strip()
+                current_job["title"] = (
+                    company_title[1].strip() if len(company_title) > 1 else ""
+                )
+                jobs.append(current_job)
+            elif line.startswith("-") or line.startswith("•"):
+                if current_job is not None:
+                    current_job["responsibilities"].append(line.lstrip("- •").strip())
+            else:
+                if current_job is not None:
+                    if "description" not in current_job:
+                        current_job["description"] = line
+                    else:
+                        current_job["description"] += " " + line
+
+    return jobs
+
+
+def parse_skills_section(text: str) -> dict:
+    """Parse skills section into structured format."""
+    skills = {
+        "backend_skills": "",
+        "frontend_skills": "",
+        "database_skills": "",
+        "cloud_technologies": "",
+        "devops_skills": "",
+        "methodologies": "",
+        "soft_skills": "",
+    }
+
+    current_category = None
+    for line in text.split("\n"):
+        line = line.strip()
+        if line:
+            if ":" in line:
+                category, content = line.split(":", 1)
+                category = category.strip().lower()
+                if "backend" in category:
+                    current_category = "backend_skills"
+                elif "frontend" in category:
+                    current_category = "frontend_skills"
+                elif "database" in category:
+                    current_category = "database_skills"
+                elif "cloud" in category:
+                    current_category = "cloud_technologies"
+                elif "devops" in category:
+                    current_category = "devops_skills"
+                elif "methodologies" in category:
+                    current_category = "methodologies"
+                elif "soft" in category:
+                    current_category = "soft_skills"
+
+                if current_category:
+                    skills[current_category] = content.strip()
+            elif current_category and line:
+                skills[current_category] += " " + line
+
+    return skills
+
+
+def parse_education_section(text: str) -> dict:
+    """Parse education section into structured format."""
+    education = {
+        "masters_title": "",
+        "masters_institution": "",
+        "masters_year": "",
+        "bachelor_title": "",
+        "bachelor_institution": "",
+        "bachelor_year": "",
+    }
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if line:
+            if "master" in line.lower():
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    education["masters_title"] = parts[0].strip()
+                    education["masters_institution"] = parts[1].strip()
+                    education["masters_year"] = parts[2].strip()
+            elif "bachelor" in line.lower():
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    education["bachelor_title"] = parts[0].strip()
+                    education["bachelor_institution"] = parts[1].strip()
+                    education["bachelor_year"] = parts[2].strip()
+
+    return education
+
+
+@router.post("/auto-generate-resume-docx")
+async def auto_generate_resume_docx(
+    resume_file: UploadFile = File(...),
+    job_description: str = Form(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    preferred_titles: Optional[str] = Form(None),
+    target_industries: Optional[str] = Form(None),
+    keywords: Optional[str] = Form(None),
+):
+    """
+    Enhanced endpoint for resume generation with comprehensive logging and validation.
+    """
+    try:
+        # Step 1: Log initial request
+        logger.info("Starting resume generation process")
+        logger.debug(f"""
+        Processing request with:
+        - File name: {resume_file.filename}
+        - Job description length: {len(job_description)}
+        - Preferred titles: {preferred_titles}
+        - Target industries: {target_industries}
+        - Keywords: {keywords}
+        """)
+
+        # Step 2: Validate file
+        if not resume_file.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="No file provided"
+            )
+
+        # Step 3: Process file
+        try:
+            resume_text = await process_file_with_cleanup(resume_file)
+            logger.debug(
+                f"Successfully extracted {len(resume_text)} characters from resume"
+            )
+
+            # Step 4: Initialize enhancer and process resume
+            try:
+                docx_enhancer = DocxTemplateEnhancer()
+                logger.debug("Created DocxTemplateEnhancer instance")
+
+                # Prepare preferences dictionary
+                preferences = {
+                    "preferred_job_titles": preferred_titles.split(",")
+                    if preferred_titles
+                    else [],
+                    "target_industries": target_industries.split(",")
+                    if target_industries
+                    else [],
+                    "keywords": keywords.split(",") if keywords else [],
+                }
+                logger.debug(
+                    f"Prepared preferences: {json.dumps(preferences, indent=2)}"
+                )
+
+                # Process through enhancer
+                enhancement_result = await docx_enhancer.enhance_resume_for_template(
+                    resume_content=resume_text,
+                    job_description=job_description,
+                    preferences=preferences,
+                )
+                logger.debug("Successfully enhanced resume content")
+
+                # Validate enhancement result
+                if (
+                    not enhancement_result
+                    or "enhanced_resume_docx" not in enhancement_result
+                ):
+                    raise ValueError("Enhancement result is missing required data")
+
+                # Get template data
+                template_data = enhancement_result["enhanced_resume_docx"]
+
+            except Exception as e:
+                logger.error(f"Enhancement process failed: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Resume enhancement failed: {str(e)}",
+                )
+
+            # Step 5: Generate DOCX using template handler
+            try:
+                logger.debug("Starting DOCX generation")
+                response = await template_handler.generate_resume_docx(
+                    resume_data=template_data, background_tasks=background_tasks
+                )
+                logger.info("Successfully generated enhanced resume DOCX")
+                return response
+
+            except ValueError as ve:
+                # Handle validation errors from template handler
+                logger.error(f"Template validation error: {str(ve)}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve)
+                )
+            except Exception as e:
+                logger.error(f"DOCX generation failed: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to generate DOCX: {str(e)}",
+                )
+
+        except ValueError as ve:
+            logger.error(f"File processing error: {str(ve)}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error("Unexpected error in resume generation", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred: {str(e)}",
         )

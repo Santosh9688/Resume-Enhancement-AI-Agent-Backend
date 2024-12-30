@@ -175,54 +175,58 @@ class TransactionManager:
     def __init__(self, db: Session, max_retries: int = 3):
         self.db = db
         self.max_retries = max_retries
-        logger.debug(f"TransactionManager initialized with session id: {id(db)}")
+        self.logger = logging.getLogger(__name__)
+        self.logger.debug(f"TransactionManager initialized with session id: {id(db)}")
 
-    async def execute_operation(
+    def execute_operation(
         self,
         operation: Callable[..., T],
         error_message: str = "Database operation failed",
-        *args: Any,
         **kwargs: Any,
     ) -> T:
+        """Execute a database operation with transaction management and retries"""
         retry_count = 0
         last_error = None
 
-        logger.debug(f"Starting execute_operation with session id: {id(self.db)}")
-        logger.debug(f"Current transaction status: {self.db.in_transaction()}")
+        self.logger.debug(f"Starting execute_operation with session id: {id(self.db)}")
+        self.logger.debug(f"Current transaction status: {self.db.in_transaction()}")
 
         while retry_count < self.max_retries:
             try:
-                # Check transaction state before beginning
+                # Check if there's an existing transaction
                 if self.db.in_transaction():
-                    logger.warning("Transaction already in progress, rolling back")
-                    await self.db.rollback()
+                    self.logger.warning("Transaction already in progress, rolling back")
+                    self.db.rollback()
 
-                logger.debug("Beginning new transaction")
-                async with self.db.begin():
-                    logger.debug(f"Executing operation {operation.__name__}")
-                    result = await operation(*args, **kwargs)
-                    await self.db.commit()
-                    logger.debug("Database operation completed successfully")
-                    return result
+                # Execute the operation (now properly awaiting it)
+                self.logger.debug(f"Executing operation {operation.__name__}")
+                result = operation(**kwargs)
+
+                # Commit the transaction
+                self.db.commit()
+                self.logger.debug("Transaction committed successfully")
+
+                return result
 
             except SQLAlchemyError as e:
                 last_error = e
                 retry_count += 1
-                logger.warning(
+                self.logger.warning(
                     f"Database operation failed (attempt {retry_count}): {str(e)}"
                 )
+
                 try:
                     if self.db.in_transaction():
-                        await self.db.rollback()
-                        logger.debug("Transaction rolled back successfully")
+                        self.db.rollback()
+                        self.logger.debug("Transaction rolled back successfully")
                 except Exception as rollback_error:
-                    logger.error(f"Rollback failed: {str(rollback_error)}")
+                    self.logger.error(f"Rollback failed: {str(rollback_error)}")
 
                 if retry_count >= self.max_retries:
                     break
 
         error_details = f"{error_message}: {str(last_error)}"
-        logger.error(error_details)
+        self.logger.error(error_details)
         raise DatabaseError(error_details)
 
 
